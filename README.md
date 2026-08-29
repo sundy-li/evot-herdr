@@ -29,20 +29,20 @@ A small, independent session-hook adapter that connects [evot](https://github.co
 Make the wrapper executable and run it directly:
 
 ```bash
-chmod +x /path/to/evot-herdr/bin/evot-herdr
-/path/to/evot-herdr/bin/evot-herdr
+chmod +x "$PWD/bin/evot-herdr"
+"$PWD/bin/evot-herdr"
 ```
 
 The wrapper starts `evot`, automatically sets `EVOT_SESSION_HOOK` to the adapter, and forwards command-line arguments, standard input, standard output, and standard error. For example:
 
 ```bash
-/path/to/evot-herdr/bin/evot-herdr --help
+"$PWD/bin/evot-herdr" --help
 ```
 
 Override the evot executable when developing against a local build:
 
 ```bash
-EVOT_BIN_PATH=/path/to/evot /path/to/evot-herdr/bin/evot-herdr
+EVOT_BIN_PATH=/path/to/evot "$PWD/bin/evot-herdr"
 ```
 
 If evot was already running before the hook was installed or changed, restart it so that the new hook environment is applied. A source-built evot can be installed with:
@@ -57,7 +57,7 @@ make install
 The executable reads generic NDJSON from standard input when its standard input is not a TTY:
 
 ```bash
-EVOT_SESSION_HOOK=/path/to/evot-herdr/bin/evot-herdr evot
+EVOT_SESSION_HOOK="$PWD/bin/evot-herdr" evot
 ```
 
 Herdr normally supplies the adapter environment. To run it manually, set at least a pane ID:
@@ -65,7 +65,7 @@ Herdr normally supplies the adapter environment. To run it manually, set at leas
 ```bash
 HERDR_PANE_ID=w1:p1 \
 HERDR_BIN_PATH=/path/to/herdr \
-/path/to/evot-herdr/bin/evot-herdr < events.ndjson
+"$PWD/bin/evot-herdr" < events.ndjson
 ```
 
 ## Environment variables
