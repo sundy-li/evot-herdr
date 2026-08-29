@@ -1,5 +1,14 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
-import { EvotHerdrAdapter } from '../src/index.js'
+import { EvotHerdrAdapter, runEvot } from '../src/index.js'
+
+async function writeExecutable(path: string, content: string): Promise<void> {
+  await Bun.write(path, content)
+  const result = Bun.spawnSync(['chmod', '+x', path])
+  expect(result.exitCode).toBe(0)
+}
 
 describe('EvotHerdrAdapter', () => {
   test('maps lifecycle events to ordered Herdr commands', async () => {
@@ -78,6 +87,52 @@ describe('EvotHerdrAdapter', () => {
     expect(commands[1]).toContain('sid-1')
     expect(commands[2]).toContain('report-agent-session')
     expect(commands[2]).toContain('sid-1')
+  })
+
+  test('discovers the current Herdr pane when the wrapper environment omits it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-'))
+    const herdr = join(directory, 'herdr')
+    const evot = join(directory, 'evot')
+    const calls = join(directory, 'calls')
+    const previous = {
+      EVOT_BIN_PATH: process.env.EVOT_BIN_PATH,
+      EVOT_SESSION_HOOK: process.env.EVOT_SESSION_HOOK,
+      HERDR_BIN_PATH: process.env.HERDR_BIN_PATH,
+      HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+      CAPTURE: process.env.CAPTURE,
+    }
+
+    await writeExecutable(herdr, `#!/bin/sh
+if [ "$1" = "pane" ] && [ "$2" = "current" ]; then
+  printf '%s\\n' '{"result":{"pane":{"pane_id":"w9:p9"}}}'
+  exit 0
+fi
+printf '%s\\n' "$*" >> "$CAPTURE"
+`)
+    await writeExecutable(evot, `#!/bin/sh
+printf '%s\\n' '{"version":1,"event":"session_started","session_id":"sid-discovered"}' | "$EVOT_SESSION_HOOK"
+`)
+
+    try {
+      process.env.EVOT_BIN_PATH = evot
+      delete process.env.EVOT_SESSION_HOOK
+      process.env.HERDR_BIN_PATH = herdr
+      delete process.env.HERDR_PANE_ID
+      process.env.CAPTURE = calls
+
+      await runEvot([])
+
+      const output = await Bun.file(calls).text()
+      expect(output).toContain('pane report-agent w9:p9')
+      expect(output).toContain('pane report-agent-session w9:p9')
+      expect(output).toContain('sid-discovered')
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 
   test('is inert without a pane id', async () => {

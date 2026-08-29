@@ -33,7 +33,7 @@ chmod +x "$PWD/bin/evot-herdr"
 "$PWD/bin/evot-herdr"
 ```
 
-The wrapper starts `evot`, automatically sets `EVOT_SESSION_HOOK` to the adapter, and forwards command-line arguments, standard input, standard output, and standard error. For example:
+The wrapper starts `evot`, automatically sets `EVOT_SESSION_HOOK` to the adapter, discovers the current Herdr pane when `HERDR_PANE_ID` is not already set, and forwards command-line arguments, standard input, standard output, and standard error. For example:
 
 ```bash
 "$PWD/bin/evot-herdr" --help
@@ -72,7 +72,7 @@ HERDR_BIN_PATH=/path/to/herdr \
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `HERDR_PANE_ID` | Yes, to enable reporting | — | Herdr pane identifier. If absent, the adapter is inert. |
+| `HERDR_PANE_ID` | No in wrapper mode; yes for manual adapter mode | Auto-detected in wrapper mode | Herdr pane identifier. The wrapper discovers the current pane when this is absent. |
 | `HERDR_BIN_PATH` | No | `herdr` | Path or command name used to invoke Herdr. |
 | `EVOT_BIN_PATH` | No | `evot` | Path or command name used by the wrapper to start evot. |
 | `EVOT_SESSION_HOOK` | No | Adapter path in wrapper mode | Hook executable consumed by evot. Existing values are preserved by the wrapper. |

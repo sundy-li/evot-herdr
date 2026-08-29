@@ -47,6 +47,30 @@ function clean(value: string | undefined): string | undefined {
   return trimmed || undefined
 }
 
+interface CurrentPaneResponse {
+  result?: {
+    pane?: {
+      pane_id?: string
+    }
+  }
+}
+
+function currentPaneId(env: NodeJS.ProcessEnv): string | undefined {
+  const herdrBin = clean(env.HERDR_BIN_PATH) ?? 'herdr'
+  try {
+    const result = Bun.spawnSync([herdrBin, 'pane', 'current'], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+      env,
+    })
+    if (result.exitCode !== 0) return undefined
+    const response = JSON.parse(new TextDecoder().decode(result.stdout)) as CurrentPaneResponse
+    return clean(response.result?.pane?.pane_id)
+  } catch {
+    return undefined
+  }
+}
+
 export class EvotHerdrAdapter {
   private readonly paneId: string | null
   private readonly herdrBin: string
@@ -189,6 +213,10 @@ export async function runEvot(args: string[] = []): Promise<void> {
   const env = { ...process.env }
   if (!clean(env.EVOT_SESSION_HOOK)) {
     env.EVOT_SESSION_HOOK = resolve(import.meta.dir, '../bin/evot-herdr')
+  }
+  if (!clean(env.HERDR_PANE_ID)) {
+    const paneId = currentPaneId(env)
+    if (paneId) env.HERDR_PANE_ID = paneId
   }
   const evotBin = clean(env.EVOT_BIN_PATH) ?? 'evot'
   try {
