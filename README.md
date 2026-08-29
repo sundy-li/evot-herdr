@@ -104,7 +104,7 @@ Supported event names are `session_started`, `state_changed`, `run_started`, `ru
 | `run_failed` | Report `idle`, including the failure message when supplied. |
 | `session_ended` | Invoke `release-agent` and clear the adapter session state. |
 
-Every report includes the source `custom:evot`, agent name `evot`, and an increasing `--seq` value. Repeated reports with the same state, message, and session are suppressed.
+Every report includes the source `custom:evot`, agent name `evot`, and a timestamp-based monotonic `--seq` value. The sequence remains newer across separate adapter processes, which is required by Herdr to accept updates after evot is restarted. Repeated reports with the same state, message, and session are suppressed.
 
 All Herdr calls are best effort. If Herdr is unavailable, a failed command does not terminate the NDJSON reader or affect evot's main process.
 

@@ -42,6 +42,28 @@ describe('EvotHerdrAdapter', () => {
     expect(commands[3]).toContain('approve')
   })
 
+  test('keeps sequence numbers newer across adapter instances', async () => {
+    const commands: string[][] = []
+    const run = async (argv: string[]) => { commands.push(argv) }
+    const first = new EvotHerdrAdapter({
+      env: { HERDR_PANE_ID: 'w1:p1' },
+      run,
+    })
+    const second = new EvotHerdrAdapter({
+      env: { HERDR_PANE_ID: 'w1:p1' },
+      run,
+    })
+
+    await first.handle({ version: 1, event: 'session_started', session_id: 'sid-1' })
+    await first.handle({ version: 1, event: 'session_ended', session_id: 'sid-1' })
+    await second.handle({ version: 1, event: 'session_started', session_id: 'sid-2' })
+
+    const sequences = commands.map(command => Number(command[command.indexOf('--seq') + 1]))
+    expect(sequences).toHaveLength(5)
+    expect(sequences.slice(1)).toEqual([...sequences.slice(1)].sort((a, b) => a - b))
+    expect(sequences[2]).toBeGreaterThan(sequences[1]!)
+  })
+
   test('deduplicates repeated state events', async () => {
     const commands: string[][] = []
     const adapter = new EvotHerdrAdapter({

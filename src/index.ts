@@ -33,6 +33,17 @@ export interface AdapterOptions {
 const SOURCE = 'custom:evot'
 const AGENT = 'evot'
 
+// Herdr de-duplicates stale updates by source and sequence number. The hook
+// adapter is usually a short-lived process, so an in-memory counter starting
+// at 1 would make every later evot launch look stale. Use a microsecond-scale
+// wall-clock sequence and keep it monotonic within this process as well.
+let reportSequence = Date.now() * 1_000
+
+function nextReportSequence(): number {
+  reportSequence = Math.max(reportSequence + 1, Date.now() * 1_000)
+  return reportSequence
+}
+
 function defaultRun(argv: string[]): Promise<void> {
   try {
     const child = Bun.spawn(argv, { stdout: 'ignore', stderr: 'ignore' })
@@ -79,7 +90,6 @@ export class EvotHerdrAdapter {
   private lastState: SessionHookState | undefined
   private lastMessage: string | undefined
   private lastReportedSessionId: string | undefined
-  private sequence = 0
 
   constructor(options: AdapterOptions = {}) {
     const env = options.env ?? process.env
@@ -149,7 +159,7 @@ export class EvotHerdrAdapter {
       '--state',
       state,
       '--seq',
-      String(++this.sequence),
+      String(nextReportSequence()),
     ]
     if (this.sessionId) argv.push('--agent-session-id', this.sessionId)
     if (state === 'blocked' && clean(message)) argv.push('--message', clean(message)!)
@@ -171,7 +181,7 @@ export class EvotHerdrAdapter {
       '--agent-session-id',
       this.sessionId,
       '--seq',
-      String(++this.sequence),
+      String(nextReportSequence()),
     ])
   }
 
@@ -187,7 +197,7 @@ export class EvotHerdrAdapter {
       '--agent',
       AGENT,
       '--seq',
-      String(++this.sequence),
+      String(nextReportSequence()),
     ])
   }
 }
