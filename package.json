@@ -1,0 +1,15 @@
+{
+  "name": "@evotai/evot-herdr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "evot-herdr": "./bin/evot-herdr"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13"
+  }
+}
