@@ -28,6 +28,7 @@ export interface HerdrRunner {
 export interface AdapterOptions {
   env?: NodeJS.ProcessEnv
   run?: HerdrRunner
+  discoverPane?: boolean
 }
 
 const SOURCE = 'custom:evot'
@@ -93,8 +94,15 @@ export class EvotHerdrAdapter {
 
   constructor(options: AdapterOptions = {}) {
     const env = options.env ?? process.env
-    this.paneId = clean(env.HERDR_PANE_ID) ?? null
     this.herdrBin = clean(env.HERDR_BIN_PATH) ?? 'herdr'
+    // A hook launched directly by evot only inherits EVOT_SESSION_HOOK. In
+    // that mode, discover the pane instead of silently disabling the adapter.
+    // Tests and library callers that provide an explicit env remain fully
+    // deterministic unless they opt into discovery.
+    const discoverPane = options.discoverPane ?? options.env === undefined
+    this.paneId = clean(env.HERDR_PANE_ID)
+      ?? (discoverPane ? currentPaneId(env) : undefined)
+      ?? null
     this.run = options.run ?? defaultRun
   }
 

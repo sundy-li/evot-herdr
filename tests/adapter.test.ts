@@ -157,6 +157,32 @@ printf '%s\\n' '{"version":1,"event":"session_started","session_id":"sid-discove
     }
   })
 
+  test('discovers the current pane for a directly launched hook', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-'))
+    const herdr = join(directory, 'herdr')
+    await writeExecutable(herdr, `#!/bin/sh
+if [ "$1" = "pane" ] && [ "$2" = "current" ]; then
+  printf '%s\\n' '{"result":{"pane":{"pane_id":"w8:p1"}}}'
+fi
+`)
+
+    try {
+      const commands: string[][] = []
+      const adapter = new EvotHerdrAdapter({
+        env: { HERDR_BIN_PATH: herdr },
+        discoverPane: true,
+        run: async argv => { commands.push(argv) },
+      })
+
+      await adapter.handle({ version: 1, event: 'session_started', session_id: 'sid-direct' })
+
+      expect(adapter.enabled).toBe(true)
+      expect(commands[0]).toContain('w8:p1')
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('is inert without a pane id', async () => {
     let called = false
     const adapter = new EvotHerdrAdapter({
