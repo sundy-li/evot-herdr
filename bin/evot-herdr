@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
-import { main, runEvot } from '../src/index.ts'
+import { isHookInvocation, main, runEvot } from '../src/index.ts'
 
-if (process.stdin.isTTY) {
-  await runEvot(process.argv.slice(2))
-} else {
+const args = process.argv.slice(2)
+if (isHookInvocation(args)) {
   await main()
+} else {
+  process.exitCode = await runEvot(args)
 }
