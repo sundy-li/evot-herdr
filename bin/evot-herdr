@@ -1,5 +1,5 @@
-#!/usr/bin/env bun
-import { isHookInvocation, main, runEvot } from '../src/index.ts'
+#!/usr/bin/env node
+import { isHookInvocation, main, runEvot } from '../dist/index.js'
 
 const args = process.argv.slice(2)
 if (isHookInvocation(args)) {

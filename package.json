@@ -1,17 +1,25 @@
 {
   "name": "@evotai/evot-herdr",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
+  "description": "Node.js session-hook adapter with automatic evot conversation restore for Herdr",
   "type": "module",
-  "bin": {
-    "evot-herdr": "./bin/evot-herdr"
-  },
+  "engines": { "node": ">=22.12.0" },
+  "bin": { "evot-herdr": "./bin/evot-herdr" },
+  "files": ["bin/", "dist/", "README.md", "CHANGELOG.md"],
+  "repository": { "type": "git", "url": "git+https://github.com/sundy-li/evot-herdr.git" },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
+  "packageManager": "pnpm@11.3.0",
   "scripts": {
-    "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "build": "tsc -p tsconfig.build.json",
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc --noEmit",
+    "test:package": "node scripts/smoke-package.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@types/bun": "1.3.13",
-    "typescript": "5.9.3"
+    "@types/node": "^22.0.0",
+    "typescript": "5.9.3",
+    "vitest": "^4.0.0"
   }
 }

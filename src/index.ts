@@ -1,5 +1,8 @@
 import {
+  accessSync,
+  constants,
   closeSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -10,7 +13,10 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { setTimeout as delay } from 'node:timers/promises'
+import { queryCommand, spawnCommand, terminateProcessTree } from './process.js'
 
 export type SessionHookState = 'working' | 'blocked' | 'idle'
 
@@ -42,6 +48,8 @@ export interface AdapterOptions {
   env?: NodeJS.ProcessEnv
   run?: HerdrRunner
   discoverPane?: boolean
+  /** Inject capability detection for tests/embedded callers. Queried once. */
+  supportsResume?: () => boolean
 }
 
 const SOURCE = 'custom:evot'
@@ -164,7 +172,13 @@ function reserveSequenceBlock(env: NodeJS.ProcessEnv): bigint {
     if (blockBase + SEQUENCE_BLOCK_SIZE - 1n > MAX_I64) {
       throw new Error('Herdr sequence space exhausted')
     }
-    writeFileSync(temporaryPath, `${generation}\n`, { mode: 0o600 })
+    const temporary = openSync(temporaryPath, 'wx', 0o600)
+    try {
+      writeFileSync(temporary, `${generation}\n`)
+      fsyncSync(temporary)
+    } finally {
+      closeSync(temporary)
+    }
     renameSync(temporaryPath, statePath)
     return blockBase
   } finally {
@@ -192,10 +206,9 @@ async function defaultRun(
 ): Promise<boolean> {
   try {
     const timeout = positiveInteger(env.HERDR_COMMAND_TIMEOUT_MS, DEFAULT_HERDR_TIMEOUT_MS)
-    const child = Bun.spawn(argv, {
+    const { child, exited } = spawnCommand(argv, {
       env,
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdio: 'ignore',
       detached: process.platform !== 'win32',
     })
     let timedOut = false
@@ -208,33 +221,22 @@ async function defaultRun(
       }, timeout)
     })
 
-    const exitCode = await Promise.race([child.exited, timeoutReached])
-    if (timeoutHandle) clearTimeout(timeoutHandle)
+    let exitCode: number | undefined
+    try {
+      exitCode = await Promise.race([exited, timeoutReached])
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle)
+    }
     if (!timedOut) return exitCode === 0
 
     // Give well-behaved processes a short grace period, then make sure no
     // descendant survives after the process-group leader exits.
-    await Promise.race([child.exited, Bun.sleep(100)])
+    await Promise.race([exited, delay(100)])
     terminateProcessTree(child.pid, 'SIGKILL')
-    await child.exited.catch(() => undefined)
+    await exited.catch(() => undefined)
     return false
   } catch {
     return false
-  }
-}
-
-function terminateProcessTree(pid: number, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform !== 'win32') {
-      process.kill(-pid, signal)
-    } else {
-      Bun.spawnSync(['taskkill', '/PID', String(pid), '/T', '/F'], {
-        stdout: 'ignore',
-        stderr: 'ignore',
-      })
-    }
-  } catch {
-    // The process or process group has already exited.
   }
 }
 
@@ -256,17 +258,9 @@ function currentPaneId(env: NodeJS.ProcessEnv): string | undefined {
   const herdrBin = clean(env.HERDR_BIN_PATH) ?? 'herdr'
   const timeout = positiveInteger(env.HERDR_COMMAND_TIMEOUT_MS, DEFAULT_HERDR_TIMEOUT_MS)
   try {
-    const result = Bun.spawnSync([herdrBin, 'pane', 'current'], {
-      stdout: 'pipe',
-      stderr: 'ignore',
-      env,
-      timeout,
-      killSignal: 'SIGTERM',
-      detached: process.platform !== 'win32',
-    })
-    if (result.exitedDueToTimeout) terminateProcessTree(result.pid, 'SIGKILL')
-    if (result.exitCode !== 0) return undefined
-    const response = JSON.parse(new TextDecoder().decode(result.stdout)) as CurrentPaneResponse
+    const output = queryCommand([herdrBin, 'pane', 'current'], env, timeout)
+    if (!output) return undefined
+    const response = JSON.parse(output) as CurrentPaneResponse
     return clean(response.result?.pane?.pane_id)
   } catch {
     return undefined
@@ -317,9 +311,20 @@ export class EvotHerdrAdapter {
   private lastReportedSessionId: string | undefined
   private lastRegisteredSessionId: string | undefined
   private releaseNeeded = false
+  private readonly env: NodeJS.ProcessEnv
+  private readonly detectResume: () => boolean
+  private resumeSupported: boolean | undefined
 
   constructor(options: AdapterOptions = {}) {
     const env = options.env ?? process.env
+    this.env = env
+    this.detectResume = options.supportsResume ?? (() => {
+      const help = queryCommand(
+        [this.herdrBin, 'pane', 'report-agent-session', '--help'], env,
+        positiveInteger(env.HERDR_COMMAND_TIMEOUT_MS, DEFAULT_HERDR_TIMEOUT_MS),
+      )
+      return /resume[_-]arg/i.test(help ?? '')
+    })
     // Reserve before pane discovery so construction order, not the completion
     // time of external work, determines which hook owns the newer generation.
     // If persistence is unavailable, disable this best-effort integration
@@ -397,6 +402,9 @@ export class EvotHerdrAdapter {
         if (event.state) await this.reportAndRegister(event.state, event.message)
         return
       case 'session_ended':
+        // A replacement follows immediately. Keep ownership until its new
+        // identity/resume command is registered instead of releasing the pane.
+        if (event.reason === 'session_changed') return
         await this.release()
         this.clearSession()
         return
@@ -465,7 +473,10 @@ export class EvotHerdrAdapter {
       || !this.sessionId
       || this.lastRegisteredSessionId === this.sessionId
     ) return
-    if (await this.runCommand([
+    // Only an accepted state report establishes pane ownership. Never mark a
+    // session registered after a failed ownership claim.
+    if (this.lastReportedSessionId !== this.sessionId) return
+    const argv = [
       this.herdrBin,
       'pane',
       'report-agent-session',
@@ -478,7 +489,11 @@ export class EvotHerdrAdapter {
       this.sessionId,
       '--seq',
       this.nextSequence(),
-    ])) this.lastRegisteredSessionId = this.sessionId
+    ]
+    this.resumeSupported ??= this.detectResume()
+    const resume = buildResumeArgv(this.sessionId, this.env)
+    if (this.resumeSupported && resume) argv.push('--', ...resume)
+    if (await this.runCommand(argv)) this.lastRegisteredSessionId = this.sessionId
   }
 
   private async release(): Promise<void> {
@@ -567,9 +582,8 @@ function sameExecutable(
   right: string,
   env: NodeJS.ProcessEnv,
 ): boolean {
-  const options = { PATH: env.PATH, cwd: process.cwd() }
-  const resolvedLeft = Bun.which(left, options) ?? resolve(left)
-  const resolvedRight = Bun.which(right, options) ?? resolve(right)
+  const resolvedLeft = executableOnPath(left, env) ?? resolve(left)
+  const resolvedRight = executableOnPath(right, env) ?? resolve(right)
   try {
     return realpathSync(resolvedLeft) === realpathSync(resolvedRight)
   } catch {
@@ -577,7 +591,38 @@ function sameExecutable(
   }
 }
 
-const EXECUTABLE_PATH = resolve(import.meta.dir, '../bin/evot-herdr')
+function executableOnPath(command: string, env: NodeJS.ProcessEnv): string | undefined {
+  if (command.includes('/') || command.includes('\\')) return undefined
+  const extensions = process.platform === 'win32'
+    ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')]
+    : ['']
+  for (const directory of (env.PATH ?? '').split(delimiter)) {
+    for (const extension of extensions) {
+      const candidate = resolve(directory, command + extension)
+      try {
+        accessSync(candidate, constants.X_OK)
+        if (statSync(candidate).isFile()) return candidate
+      } catch { /* keep searching */ }
+    }
+  }
+  return undefined
+}
+
+const EXECUTABLE_PATH = fileURLToPath(new URL('../bin/evot-herdr', import.meta.url))
+
+/** Match Herdr's portable restore quoting restrictions. Never construct shell
+ * text, and never let an unsupported resume argv break ordinary state reports.
+ */
+export function buildResumeArgv(sessionId: string, env: NodeJS.ProcessEnv): string[] | undefined {
+  const command = clean(env.EVOT_HERDR_RESUME_COMMAND) ?? 'evot-herdr'
+  const argv = [command, '--resume', sessionId]
+  const envFile = clean(env.EVOT_HERDR_ENV_FILE)
+  if (envFile) argv.push('--env-file', resolve(envFile))
+  if (!/^[a-z0-9_.][a-z0-9_.-]*$/i.test(command)) return undefined
+  if (argv.some(arg => /['\p{Cc}]/u.test(arg))) return undefined
+  if (argv.reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0) > 8192) return undefined
+  return argv
+}
 
 /**
  * `bin/evot-herdr` is both the wrapper and the hook. evot launches the hook
@@ -596,6 +641,26 @@ export function isHookInvocation(
   return configuredHook !== undefined && sameExecutable(configuredHook, EXECUTABLE_PATH, env)
 }
 
+const VALUE_OPTIONS = new Set([
+  '-p', '--prompt', '-f', '--file', '--model', '--port', '-r', '--resume',
+  '--output-format', '--max-turns', '--max-tokens', '--max-duration',
+  '--append-system-prompt', '--skills', '--skill', '--tools', '--permission',
+])
+
+/** Read only the startup config flag, never a prompt/attachment/option value
+ * that happens to contain the text "--env-file".
+ */
+export function envFileFromArgs(args: string[]): string | undefined {
+  let envFile: string | undefined
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!
+    if (arg === '--env-file' && args[index + 1]) envFile = resolve(args[++index]!)
+    else if (VALUE_OPTIONS.has(arg) && args[index + 1]) index++
+    else if (arg === '--fork' && args[index + 1] && !args[index + 1]!.startsWith('-')) index++
+  }
+  return envFile
+}
+
 export async function runEvot(args: string[] = []): Promise<number> {
   const env = { ...process.env }
   if (!clean(env.EVOT_SESSION_HOOK)) env.EVOT_SESSION_HOOK = EXECUTABLE_PATH
@@ -603,15 +668,26 @@ export async function runEvot(args: string[] = []): Promise<number> {
     const paneId = currentPaneId(env)
     if (paneId) env.HERDR_PANE_ID = paneId
   }
+  // Preserve custom config across a server restart without persisting secrets
+  // or replaying one-shot prompts. Model selection comes from session metadata.
+  const envFile = envFileFromArgs(args)
+  if (envFile) env.EVOT_HERDR_ENV_FILE = envFile
   const evotBin = clean(env.EVOT_BIN_PATH) ?? 'evot'
   try {
-    const child = Bun.spawn([evotBin, ...args], {
-      env,
-      stdin: 'inherit',
-      stdout: 'inherit',
-      stderr: 'inherit',
-    })
-    return await child.exited
+    const { child, exited } = spawnCommand([evotBin, ...args], { env, stdio: 'inherit' })
+    const onInterrupt = () => { child.kill('SIGINT') }
+    const onTerminate = () => { child.kill('SIGTERM') }
+    const onHangup = () => { child.kill('SIGHUP') }
+    process.on('SIGINT', onInterrupt)
+    process.on('SIGTERM', onTerminate)
+    process.on('SIGHUP', onHangup)
+    try {
+      return await exited
+    } finally {
+      process.off('SIGINT', onInterrupt)
+      process.off('SIGTERM', onTerminate)
+      process.off('SIGHUP', onHangup)
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error(`evot-herdr: failed to start ${evotBin}: ${detail}`)
@@ -641,5 +717,3 @@ export async function main(): Promise<void> {
     if (signalExitCode !== undefined) process.exitCode = signalExitCode
   }
 }
-
-if (import.meta.main) await main()

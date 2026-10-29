@@ -1,6 +1,6 @@
 # evot-herdr
 
-A small, independent session-hook adapter that connects [evot](https://github.com/sundy-li/evot) with [Herdr](https://github.com/sundy-li/herdr).
+A small, independent session-hook adapter that connects [evot](https://github.com/sundy-li/evot) with [Herdr](https://herdr.dev).
 
 `evot-herdr` is a single executable with two roles. Run it directly and it starts evot as a transparent wrapper; when evot launches it as `EVOT_SESSION_HOOK`, it consumes evot's generic NDJSON stream and translates lifecycle events into Herdr pane commands. evot remains independent of Herdr.
 
@@ -9,8 +9,10 @@ A small, independent session-hook adapter that connects [evot](https://github.co
 - Runs as a transparent wrapper around `evot` and preserves its exit status.
 - Detects hook mode from three signals (self-referenced `EVOT_SESSION_HOOK`, no arguments, piped stdin) instead of stdin TTY state alone.
 - Reports `working`, `blocked`, and `idle` lifecycle states to Herdr.
-- Propagates evot's `session_id` as the Herdr agent session reference.
-- Releases the Herdr agent on `session_ended`, stdin EOF, `SIGINT`, or `SIGTERM`.
+- Registers `evot-herdr --resume <session_id>` for conversation restore after a Herdr server restart (Herdr 0.9.2+).
+- Keeps state/session reporting compatible with older Herdr versions through capability detection.
+- Replaces the restore target when sessions change, without releasing pane ownership between them.
+- Releases the Herdr agent on explicit session exit, stdin EOF, `SIGINT`, or `SIGTERM`.
 - Times out stuck Herdr commands and terminates their process trees.
 - Retries state, session, and release updates after failed Herdr commands.
 - Deduplicates only successfully reported state notifications.
@@ -19,7 +21,8 @@ A small, independent session-hook adapter that connects [evot](https://github.co
 
 ## Requirements
 
-- [Bun](https://bun.sh/) 1.x
+- Node.js 22.12+ (no Bun, tsx, or runtime npm dependencies).
+- Herdr 0.9.2+ for automatic restore; older versions still receive lifecycle reports.
 - An installed `evot` executable, unless `EVOT_BIN_PATH` is set.
 - A Herdr installation available as `herdr`, or an explicit `HERDR_BIN_PATH`.
 - A Herdr-managed pane. The wrapper and directly launched hook can discover the current pane when `HERDR_PANE_ID` is absent.
@@ -28,10 +31,21 @@ A small, independent session-hook adapter that connects [evot](https://github.co
 
 ### Recommended: wrapper mode
 
+Install the release package (when published to npm):
+
 ```bash
-chmod +x "$PWD/bin/evot-herdr"
-"$PWD/bin/evot-herdr"
+npm install -g @evotai/evot-herdr
+# or: pnpm add -g @evotai/evot-herdr
+evot-herdr
 ```
+
+A GitHub release tarball is also directly installable:
+
+```bash
+npm install -g https://github.com/sundy-li/evot-herdr/releases/download/v0.2.0/evotai-evot-herdr-0.2.0.tgz
+```
+
+For a source checkout, run `pnpm install && pnpm run build`, then add its `bin/` directory to `PATH`. The CLI runs compiled JavaScript from `dist/`, not TypeScript.
 
 `evot-herdr` runs in wrapper mode unless all hook-mode conditions below hold. It:
 
@@ -60,7 +74,7 @@ Export the hook once and run `evot` directly; this is the typical shell setup:
 
 ```bash
 # ~/.zshrc
-export EVOT_SESSION_HOOK="$HOME/work/evot-herdr/bin/evot-herdr"
+export EVOT_SESSION_HOOK="$(command -v evot-herdr)"
 ```
 
 evot launches the hook with no arguments and a piped stdin. The executable enters hook mode only when **all** of the following are true:
@@ -88,10 +102,44 @@ Running outside a Herdr pane is harmless: pane discovery fails and the hook stay
 | --- | --- | --- | --- |
 | `HERDR_PANE_ID` | No | Current Herdr pane | Explicit pane identifier. |
 | `HERDR_BIN_PATH` | No | `herdr` | Herdr executable path or command name. |
-| `HERDR_COMMAND_TIMEOUT_MS` | No | `2000` | Positive integer timeout for pane discovery and each Herdr update. Timed-out process trees are terminated. |
+| `HERDR_COMMAND_TIMEOUT_MS` | No | `2000` | Positive integer timeout for pane discovery, capability detection, and each Herdr update. Timed-out process trees are terminated. |
 | `EVOT_HERDR_SEQUENCE_STATE_PATH` | No | User state directory | Persistent fencing-sequence file. Override mainly for tests or portable installations. |
 | `EVOT_BIN_PATH` | No | `evot` | evot executable path or command name. |
 | `EVOT_SESSION_HOOK` | No | `bin/evot-herdr` | Hook passed to evot by the wrapper. Custom values are preserved. |
+| `EVOT_HERDR_RESUME_COMMAND` | No | `evot-herdr` | Plain command name on `PATH` used for restore. Set to `evot` only if your shell already configures `EVOT_SESSION_HOOK`. Absolute executable paths cannot be used for Herdr restore. |
+| `EVOT_HERDR_ENV_FILE` | No | Unset | Config file to add as `--env-file` to the restore command. Wrapper mode captures `--env-file` automatically as an absolute path. Set explicitly when launching plain `evot` with a non-default config. |
+
+## Automatic conversation restore
+
+Start evot through `evot-herdr` inside a Herdr pane, and send at least one prompt so a persisted session exists. On Herdr 0.9.2+, the adapter reports both the full session ID and a portable restore argv:
+
+```text
+evot-herdr --resume <full-session-id> [--env-file /absolute/config.env]
+```
+
+No global “latest session” lookup is used: each pane gets its own conversation. Keep `evot-herdr`, `evot`, and Node.js on the restored shell's `PATH`; set any custom `EVOT_BIN_PATH` persistently in that shell too. Restart existing evot processes after installing this adapter.
+
+Herdr's default is to resume agents. If disabled, enable it in `~/.config/herdr/config.toml` and reload/restart Herdr:
+
+```toml
+[session]
+resume_agents_on_restore = true
+```
+
+- Detaching a Herdr client leaves the server and evot processes running; no restore is necessary.
+- After a **Herdr server restart**, reattach the same Herdr session. Herdr restores the pane's cwd and runs the registered command after a client attaches.
+- User `/exit` clears automatic restore. Switching sessions replaces the target instead of clearing ownership. EOF/signals still attempt cleanup; Herdr saves its shutdown snapshot before shutting down panes and rejects late reports.
+- This restores **saved conversation context**, not a running process or tool call. It does not submit a prompt or replay interrupted commands. Unsaved streaming output, forced power loss, and OS shutdown races are not guaranteed recoverable.
+- Missing `evot-herdr` on `PATH`, invalid portable argv (apostrophes/control characters or more than 8 KiB), unavailable config/cwd, or disabled Herdr restore prevents automatic restoration. Ordinary lifecycle reporting remains best effort.
+- Use an evot build containing direct-ID startup lookup: older evot builds may fail to restore sessions outside their recent 20-session startup list. The matching evot change is required; upgrading this adapter alone does not fix that limitation.
+
+Test in a disposable session, not your working session:
+
+1. Start `herdr --session evot-restore-test` and run `evot-herdr` in a pane.
+2. Send a prompt, then inspect the pane with `herdr pane get "$HERDR_PANE_ID"`.
+3. From another terminal run `herdr session stop evot-restore-test`.
+4. Reopen `herdr --session evot-restore-test`; the same conversation should appear without submitting new work.
+5. Quit evot explicitly and repeat the restart; it should remain an ordinary shell.
 
 ## Event protocol
 
@@ -120,12 +168,12 @@ Supported events are `session_started`, `state_changed`, `run_started`, `run_fin
 
 | evot event | Herdr action |
 | --- | --- |
-| `session_started` | Report `idle` and register `session_id` when present. |
+| `session_started` | Report `idle`, then register `session_id` and restore argv when supported. |
 | `run_started` | Report `working`. |
 | `state_changed` | Report the supplied state and message. |
 | `run_finished` | Report `idle`. |
 | `run_failed` | Report `idle`, including the failure message when supplied. |
-| `session_ended` | Release the agent and clear local session state. |
+| `session_ended` | Release and clear state, except `reason: session_changed` (the replacement session keeps ownership). |
 | EOF / `SIGINT` / `SIGTERM` | Best-effort release when the hook has handled lifecycle activity. |
 
 Every command includes source `custom:evot`, agent `evot`, and a monotonic `--seq` value. Each hook reserves a persistent sequence block when it starts, fencing late updates from older overlapping hooks. This prevents an old hook's delayed `release-agent` from clearing a newer session. The generation is stored under `$XDG_STATE_HOME/evot-herdr/sequence` (normally `~/.local/state/evot-herdr/sequence`) on POSIX systems and under `%LOCALAPPDATA%\evot-herdr\sequence` on Windows. If this state cannot be safely persisted, Herdr reporting is disabled for that hook rather than risking stale updates or affecting evot.
@@ -137,15 +185,20 @@ Herdr calls are best effort and do not terminate evot. Each call has a bounded t
 ## Development
 
 ```bash
-bun install
-bun run typecheck
-bun test
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+pnpm pack
 ```
+
+The scripts also work with `npm run typecheck`, `npm test`, and `npm pack`. Vitest runs tests on Node.js; TypeScript compiles only at build/pack time. The published tarball contains `bin/` and compiled `dist/`, with no dependency on development tools.
 
 Tests use injected runners and temporary executables; a live Herdr installation is not required. The suite covers lifecycle mapping, failure retries, EOF and signal cleanup, process-tree timeouts, protocol validation, wrapper exit status, wrapper/hook mode selection, and non-TTY wrapper execution.
 
 Main files:
 
-- [`src/index.ts`](src/index.ts): adapter, protocol validation, command execution, and wrapper logic.
+- [`src/index.ts`](src/index.ts): adapter, protocol validation, restore registration, and wrapper logic.
+- [`src/process.ts`](src/process.ts): Node.js process execution, bounded CLI queries, signal exit status, and process-tree cleanup.
 - [`bin/evot-herdr`](bin/evot-herdr): single entry point; selects wrapper or hook mode.
 - [`tests/adapter.test.ts`](tests/adapter.test.ts): unit and process-level regression tests.
+- [`tests/resume.test.ts`](tests/resume.test.ts): restore argv, capability detection, shutdown boundary, config preservation, and old-version compatibility.

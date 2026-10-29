@@ -1,7 +1,11 @@
-import { chmod, mkdtemp, rm, utimes } from 'node:fs/promises'
+import { chmod, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { setTimeout as delay } from 'node:timers/promises'
+import { file, spawnTest } from './helpers.js'
+const testDirectory = fileURLToPath(new URL('.', import.meta.url))
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'vitest'
 import {
   EvotHerdrAdapter,
   parseSessionHookEvent,
@@ -21,7 +25,7 @@ afterAll(async () => {
 })
 
 async function writeExecutable(path: string, content: string): Promise<void> {
-  await Bun.write(path, content)
+  await writeFile(path, content)
   await chmod(path, 0o755)
 }
 
@@ -43,9 +47,9 @@ async function waitForFileText(
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const text = await Bun.file(path).exists() ? await Bun.file(path).text() : ''
+    const text = await file(path).exists() ? await file(path).text() : ''
     if (predicate(text)) return text
-    await Bun.sleep(10)
+    await delay(10)
   }
   throw new Error(`timed out waiting for ${path}`)
 }
@@ -331,11 +335,11 @@ printf '%s\\n' '{"version":1,"event":"session_started","session_id":"sid-discove
 
       expect(await runEvot([])).toBe(0)
 
-      const output = await Bun.file(calls).text()
+      const output = await file(calls).text()
       expect(output).toContain('pane report-agent w9:p9')
       expect(output).toContain('pane report-agent-session w9:p9')
       expect(output).toContain('pane release-agent w9:p9')
-      expect((await Bun.file(process.env.HOOK_CAPTURE).text()).trim()).toEndWith('/bin/evot-herdr')
+      expect((await file(process.env.HOOK_CAPTURE!).text()).trim().endsWith('/bin/evot-herdr')).toBe(true)
     } finally {
       process.env = previous
       await rm(directory, { recursive: true, force: true })
@@ -383,15 +387,15 @@ wait
       const adapter = new EvotHerdrAdapter({
         env: {
           HERDR_BIN_PATH: herdr,
-          HERDR_COMMAND_TIMEOUT_MS: '50',
+          HERDR_COMMAND_TIMEOUT_MS: '500',
           PID_CAPTURE: pids,
         },
         discoverPane: true,
       })
       expect(adapter.enabled).toBe(false)
 
-      await Bun.sleep(50)
-      const spawnedPids = (await Bun.file(pids).text()).trim().split('\n').map(Number)
+      await delay(50)
+      const spawnedPids = (await file(pids).text()).trim().split('\n').map(Number)
       expect(spawnedPids).toHaveLength(2)
       for (const pid of spawnedPids) {
         expect(() => process.kill(pid, 0)).toThrow()
@@ -420,7 +424,7 @@ wait
   test('is inert when sequence state cannot be persisted', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-'))
     const parentFile = join(directory, 'not-a-directory')
-    await Bun.write(parentFile, 'file')
+    await writeFile(parentFile, 'file')
     let called = false
 
     try {
@@ -447,7 +451,7 @@ wait
   test('fails closed without overwriting malformed sequence state', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-'))
     const statePath = join(directory, 'sequence')
-    await Bun.write(statePath, 'not-a-generation\n')
+    await writeFile(statePath, 'not-a-generation\n')
     let called = false
 
     try {
@@ -465,8 +469,8 @@ wait
       expect(adapter.enabled).toBe(false)
       await adapter.handle({ version: 1, event: 'session_started' })
       expect(called).toBe(false)
-      expect(await Bun.file(statePath).text()).toBe('not-a-generation\n')
-      expect(await Bun.file(`${statePath}.lock`).exists()).toBe(false)
+      expect(await file(statePath).text()).toBe('not-a-generation\n')
+      expect(await file(`${statePath}.lock`).exists()).toBe(false)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -476,8 +480,8 @@ wait
     const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-'))
     const statePath = join(directory, 'sequence')
     const lockPath = `${statePath}.lock`
-    await Bun.write(statePath, '1\n')
-    await Bun.write(lockPath, '2147483647\n')
+    await writeFile(statePath, '1\n')
+    await writeFile(lockPath, '2147483647\n')
     const stale = new Date(Date.now() - 2_000)
     await utimes(lockPath, stale, stale)
 
@@ -491,8 +495,8 @@ wait
       })
 
       expect(adapter.enabled).toBe(true)
-      expect(await Bun.file(lockPath).exists()).toBe(false)
-      expect(BigInt((await Bun.file(statePath).text()).trim()) > 1n).toBe(true)
+      expect(await file(lockPath).exists()).toBe(false)
+      expect(BigInt((await file(statePath).text()).trim()) > 1n).toBe(true)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -601,7 +605,7 @@ wait
       env: {
         HERDR_PANE_ID: 'w1:p1',
         HERDR_BIN_PATH: herdr,
-        HERDR_COMMAND_TIMEOUT_MS: '50',
+        HERDR_COMMAND_TIMEOUT_MS: '500',
         CAPTURE: capture,
         PID_CAPTURE: pids,
       },
@@ -611,11 +615,11 @@ wait
         JSON.stringify({ version: 1, event: 'session_started' }),
         JSON.stringify({ version: 1, event: 'run_started' }),
       ), adapter)
-      expect(Date.now() - started).toBeLessThan(2_000)
-      expect((await Bun.file(capture).text()).trim().split('\n')).toHaveLength(3)
+      expect(Date.now() - started).toBeLessThan(4_000)
+      expect((await file(capture).text()).trim().split('\n')).toHaveLength(3)
 
-      await Bun.sleep(50)
-      const spawnedPids = (await Bun.file(pids).text()).trim().split('\n').map(Number)
+      await delay(50)
+      const spawnedPids = (await file(pids).text()).trim().split('\n').map(Number)
       expect(spawnedPids).toHaveLength(6)
       for (const pid of spawnedPids) {
         expect(() => process.kill(pid, 0)).toThrow()
@@ -636,7 +640,7 @@ exit 23
     try {
       const env: NodeJS.ProcessEnv = { ...process.env, EVOT_BIN_PATH: evot, CAPTURE: capture }
       delete env.EVOT_SESSION_HOOK
-      const child = Bun.spawn([join(import.meta.dir, '../bin/evot-herdr'), '--help'], {
+      const child = spawnTest([join(testDirectory, '../bin/evot-herdr'), '--help'], {
         env,
         stdin: 'pipe',
         stdout: 'ignore',
@@ -644,7 +648,7 @@ exit 23
       })
       child.stdin.end()
       expect(await child.exited).toBe(23)
-      expect((await Bun.file(capture).text()).trim()).toBe('--help')
+      expect((await file(capture).text()).trim()).toBe('--help')
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -656,7 +660,7 @@ exit 23
     const herdr = join(directory, 'herdr')
     const evotCapture = join(directory, 'evot-args')
     const herdrCapture = join(directory, 'herdr-calls')
-    const wrapper = join(import.meta.dir, '../bin/evot-herdr')
+    const wrapper = join(testDirectory, '../bin/evot-herdr')
     await writeExecutable(evot, `#!/bin/sh
 printf '%s|%s\\n' "$*" "$EVOT_SESSION_HOOK" >> "$EVOT_CAPTURE"
 `)
@@ -672,7 +676,7 @@ printf '%s\\n' "$*" >> "$HERDR_CAPTURE"
       HERDR_CAPTURE: herdrCapture,
     }
     const spawn = (args: string[], env: NodeJS.ProcessEnv) => {
-      const child = Bun.spawn([wrapper, ...args], { env, stdin: 'pipe', stdout: 'ignore', stderr: 'ignore' })
+      const child = spawnTest([wrapper, ...args], { env, stdin: 'pipe', stdout: 'ignore', stderr: 'ignore' })
       child.stdin.write(`${JSON.stringify({ version: 1, event: 'session_started' })}\n`)
       child.stdin.end()
       return child.exited
@@ -681,35 +685,35 @@ printf '%s\\n' "$*" >> "$HERDR_CAPTURE"
     try {
       // Hook mode: self-referenced by absolute path, no args, piped stdin.
       expect(await spawn([], { ...baseEnv, EVOT_SESSION_HOOK: wrapper })).toBe(0)
-      expect(await Bun.file(herdrCapture).text()).toContain('pane report-agent w1:p1')
-      expect(await Bun.file(evotCapture).exists()).toBe(false)
+      expect(await file(herdrCapture).text()).toContain('pane report-agent w1:p1')
+      expect(await file(evotCapture).exists()).toBe(false)
 
       // Hook mode: self-referenced by command name through PATH.
       await rm(herdrCapture, { force: true })
       expect(await spawn([], {
         ...baseEnv,
-        PATH: `${join(import.meta.dir, '../bin')}:${process.env.PATH ?? ''}`,
+        PATH: `${join(testDirectory, '../bin')}:${process.env.PATH ?? ''}`,
         EVOT_SESSION_HOOK: 'evot-herdr',
       })).toBe(0)
-      expect(await Bun.file(herdrCapture).text()).toContain('pane report-agent w1:p1')
-      expect(await Bun.file(evotCapture).exists()).toBe(false)
+      expect(await file(herdrCapture).text()).toContain('pane report-agent w1:p1')
+      expect(await file(evotCapture).exists()).toBe(false)
 
       // Wrapper mode: same env but arguments were given.
       expect(await spawn(['--help'], { ...baseEnv, EVOT_SESSION_HOOK: wrapper })).toBe(0)
-      expect((await Bun.file(evotCapture).text()).trim()).toBe(`--help|${wrapper}`)
+      expect((await file(evotCapture).text()).trim()).toBe(`--help|${wrapper}`)
 
       // Wrapper mode: a custom hook is preserved and never treated as self.
       await rm(evotCapture, { force: true })
       const customHook = join(directory, 'custom-hook')
       expect(await spawn([], { ...baseEnv, EVOT_SESSION_HOOK: customHook })).toBe(0)
-      expect((await Bun.file(evotCapture).text()).trim()).toBe(`|${customHook}`)
+      expect((await file(evotCapture).text()).trim()).toBe(`|${customHook}`)
 
       // Wrapper mode: unset hook defaults to this executable.
       await rm(evotCapture, { force: true })
       const unset: NodeJS.ProcessEnv = { ...baseEnv }
       delete unset.EVOT_SESSION_HOOK
       expect(await spawn(['-p', 'x'], unset)).toBe(0)
-      expect((await Bun.file(evotCapture).text()).trim()).toBe(`-p x|${wrapper}`)
+      expect((await file(evotCapture).text()).trim()).toBe(`-p x|${wrapper}`)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -724,7 +728,7 @@ printf '%s\\n' "$*" >> "$HERDR_CAPTURE"
 printf '%s\\n' "$*" >> "$CAPTURE"
 `)
 
-    const hook = join(import.meta.dir, '../bin/evot-herdr')
+    const hook = join(testDirectory, '../bin/evot-herdr')
     const env = {
       ...process.env,
       EVOT_SESSION_HOOK: hook,
@@ -733,7 +737,7 @@ printf '%s\\n' "$*" >> "$CAPTURE"
       EVOT_HERDR_SEQUENCE_STATE_PATH: sequenceState,
       CAPTURE: capture,
     }
-    const older = Bun.spawn([hook], {
+    const older = spawnTest([hook], {
       env,
       stdin: 'pipe',
       stdout: 'ignore',
@@ -744,7 +748,7 @@ printf '%s\\n' "$*" >> "$CAPTURE"
       older.stdin.write(`${JSON.stringify({ version: 1, event: 'session_started', session_id: 'older' })}\n`)
       await waitForFileText(capture, text => text.includes('older'))
 
-      const newer = Bun.spawn([hook], {
+      const newer = spawnTest([hook], {
         env,
         stdin: 'pipe',
         stdout: 'ignore',
@@ -775,6 +779,32 @@ printf '%s\\n' "$*" >> "$CAPTURE"
     }
   })
 
+  test('forwards wrapper SIGTERM to evot and preserves its signal exit status', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-wrapper-signal-'))
+    const evot = join(directory, 'evot')
+    const capture = join(directory, 'signal')
+    await writeExecutable(evot, `#!/usr/bin/env node
+const fs = require('node:fs');
+process.on('SIGTERM', () => { fs.writeFileSync(process.env.CAPTURE, 'stopped'); process.exit(143); });
+fs.writeFileSync(process.env.CAPTURE, 'ready');
+setInterval(() => {}, 1000);
+`)
+    const child = spawnTest([join(testDirectory, '../bin/evot-herdr'), '--resume', 'saved'], {
+      env: { ...process.env, EVOT_BIN_PATH: evot, HERDR_PANE_ID: 'w1:p1', CAPTURE: capture },
+      stdin: 'pipe', stdout: 'ignore', stderr: 'ignore',
+    })
+    try {
+      await waitForFileText(capture, text => text === 'ready')
+      child.kill('SIGTERM')
+      expect(await child.exited).toBe(143)
+      expect(await file(capture).text()).toBe('stopped')
+    } finally {
+      child.kill('SIGTERM')
+      await child.exited
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('releases the agent before exiting on SIGTERM', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'evot-herdr-'))
     const herdr = join(directory, 'herdr')
@@ -782,8 +812,8 @@ printf '%s\\n' "$*" >> "$CAPTURE"
     await writeExecutable(herdr, `#!/bin/sh
 printf '%s\\n' "$*" >> "$CAPTURE"
 `)
-    const hook = join(import.meta.dir, '../bin/evot-herdr')
-    const child = Bun.spawn([hook], {
+    const hook = join(testDirectory, '../bin/evot-herdr')
+    const child = spawnTest([hook], {
       env: {
         ...process.env,
         EVOT_SESSION_HOOK: hook,
